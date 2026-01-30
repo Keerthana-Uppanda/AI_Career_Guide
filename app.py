@@ -1,12 +1,11 @@
 # app.py
 
-import re
 from typing import Set, Dict
 import difflib
+from io import BytesIO
 
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 
 # Optional imports
 try:
@@ -22,13 +21,21 @@ except Exception:
 from fpdf import FPDF
 from logic.career_matcher import load_careers, match_careers
 
-# ---------------------------
+# ===========================
+# Page Config
+# ===========================
+
+st.set_page_config(
+    page_title="AI Career Guide",
+    page_icon="🎯",
+    layout="wide"
+)
+
+# ===========================
 # Helpers
-# ---------------------------
+# ===========================
 
 def extract_text_from_pdf(file) -> str:
-    if pdfplumber is None:
-        raise ImportError("pdfplumber is not installed. Install it with pip install pdfplumber.")
     text_parts = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
@@ -36,337 +43,288 @@ def extract_text_from_pdf(file) -> str:
     return "\n".join(text_parts)
 
 def extract_text_from_docx(file) -> str:
-    if docx is None:
-        raise ImportError("python-docx is not installed. Install it with pip install python-docx.")
     document = docx.Document(file)
-    return "\n".join([p.text for p in document.paragraphs])
+    return "\n".join(p.text for p in document.paragraphs)
 
 def extract_resume_text(uploaded_file) -> str:
-    if uploaded_file is None:
-        return ""
     name = uploaded_file.name.lower()
     if name.endswith(".pdf"):
         return extract_text_from_pdf(uploaded_file)
     elif name.endswith(".docx"):
         return extract_text_from_docx(uploaded_file)
-    elif name.endswith(".txt"):
-        return uploaded_file.read().decode("utf-8", errors="ignore")
     else:
-        raise ValueError("Unsupported file type. Please upload a PDF, DOCX, or TXT.")
+        return uploaded_file.read().decode("utf-8", errors="ignore")
 
-# ---------------------------
-# Skill extraction
-# ---------------------------
+# ===========================
+# Skill Logic
+# ===========================
 
 def get_skill_vocab(df: pd.DataFrame) -> Set[str]:
     skills = set()
-    if "Key_Skills" not in df.columns:
-        return skills
     for cell in df["Key_Skills"].dropna():
         for s in str(cell).split(","):
             skills.add(s.strip().lower())
     return skills
 
 def detect_resume_skills(text: str, skill_vocab: Set[str]) -> Set[str]:
-    text_lower = text.lower()
     detected = set()
+    text_lower = text.lower()
     for skill in skill_vocab:
-        if skill in text_lower:
+        if skill in text_lower or difflib.get_close_matches(skill, text_lower.split(), n=1, cutoff=0.85):
             detected.add(skill)
-        else:
-            matches = difflib.get_close_matches(skill, text_lower.split(), n=1, cutoff=0.85)
-            if matches:
-                detected.add(skill)
     return detected
 
 def score_career(skill_hits: Set[str], career_skill_cell: str) -> float:
-    if not isinstance(career_skill_cell, str) or not career_skill_cell.strip():
-        return 0.0
-    career_skills = {s.strip().lower() for s in career_skill_cell.split(",") if s.strip()}
-    if not career_skills:
-        return 0.0
-    overlap = len(skill_hits.intersection(career_skills))
-    return overlap / len(career_skills)
+    skills = {s.strip().lower() for s in str(career_skill_cell).split(",") if s.strip()}
+    return len(skill_hits & skills) / len(skills) if skills else 0.0
 
-# ---------------------------
-# UI helpers
-# ---------------------------
+# ===========================
+# UI Components
+# ===========================
 
 def pill(text: str):
     st.markdown(
         f"""
         <span style="
             display:inline-block;
-            padding:6px 10px;
+            padding:6px 14px;
             border-radius:999px;
-            background:#3b82f6;
+            background:#4f46e5;
             color:white;
             font-size:0.85rem;
-            margin:4px 6px 0 0;
-            border:1px solid #2563eb;">
+            margin:4px;">
             {text}
         </span>
         """,
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-def card(career_row: Dict, score: float):
-    st.markdown(
-        """
-        <div style="
-            border:1px solid #e5e7eb;
-            border-radius:16px;
-            padding:16px;
-            background:#ffffff;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-            margin-bottom: 1rem;">
-        """,
-        unsafe_allow_html=True,
-    )
-    st.subheader(career_row.get("Career", "Unknown"))
+def career_card(career: Dict, score: float):
+    left, right = st.columns([4, 1])
 
-    if "Description" in career_row and career_row["Description"]:
-        st.write(f"_{career_row['Description']}_")
+    with left:
+        st.markdown(
+            f"""
+            <div style="
+                background:white;
+                padding:20px;
+                border-radius:18px;
+                border:1px solid #e5e7eb;
+                box-shadow:0 8px 20px rgba(0,0,0,0.08);
+            ">
+                <h3 style="margin-bottom:6px; color:#111827;">
+                    💼 {career.get('Career','')}
+                </h3>
+                <p style="margin:0; color:#4b5563; font-size:15px;">
+                    {career.get('Description','No description available')}
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
-    cols = st.columns(3)
-    cols[0].write(f"**Education:** {career_row.get('Education_Level', '-')}")
-    cols[1].write(f"**Work Style:** {career_row.get('Work_Style', '-')}")
-    cols[2].write(f"**Personality:** {career_row.get('Personality', '-')}")
+    with right:
+        st.markdown(
+            f"""
+            <div style="
+                background:#0f172a;
+                color:white;
+                padding:16px;
+                border-radius:18px;
+                text-align:center;
+            ">
+                <p style="margin:0; font-size:14px; color:#cbd5f5;">Match</p>
+                <h2 style="margin:6px 0;">{score*100:.1f}%</h2>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        st.progress(score)
 
-    st.write("**Key Skills**")
-    for s in str(career_row.get("Key_Skills", "")).split(","):
-        if s.strip():
-            pill(s.strip())
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    st.write("**Subjects**")
-    for s in str(career_row.get("Subjects", "")).split(","):
-        if s.strip():
-            pill(s.strip())
-
-    st.write("**Match Score**")
-    st.progress(min(max(score, 0.0), 1.0))
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------------------
-# PDF generation
-# ---------------------------
+# ===========================
+# PDF Generation (FIXED)
+# ===========================
 
 def generate_pdf(user_name, detected_skills, filters, top_careers):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, f"{user_name} — Career Recommendations", ln=True, align="C")
-    pdf.ln(10)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.set_text_color(59, 130, 246)
-    pdf.cell(0, 8, "Detected Skills:", ln=True)
-    pdf.set_text_color(0,0,0)
-    pdf.multi_cell(0, 8, ", ".join(detected_skills) if detected_skills else "None")
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.set_text_color(59, 130, 246)
-    pdf.cell(0, 8, "Filters Applied:", ln=True)
-    pdf.set_text_color(0,0,0)
-    filters_text = ", ".join([f"{k}: {v}" for k, v in filters.items()]) if filters else "None"
-    pdf.multi_cell(0, 8, filters_text)
-    pdf.ln(5)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.set_text_color(59, 130, 246)
-    pdf.cell(0, 8, "Top Recommended Careers:", ln=True)
-    pdf.set_text_color(0,0,0)
-    
+
+    page_width = pdf.w - 2 * pdf.l_margin
+
+    # ===== Title =====
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 12, "AI Career Guide Report", ln=True, align="C")
+    pdf.ln(4)
+
+    pdf.set_font("Arial", size=11)
+    pdf.cell(0, 8, f"Report for: {user_name}", ln=True, align="C")
+    pdf.ln(8)
+
+    # ===== Detected Skills =====
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Detected Skills", ln=True)
+    pdf.set_font("Arial", size=11)
+
+    pdf.multi_cell(
+        page_width,
+        8,
+        ", ".join(detected_skills) if detected_skills else "No skills detected"
+    )
+    pdf.ln(6)
+
+    # ===== Filters =====
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Filters Applied", ln=True)
+    pdf.set_font("Arial", size=11)
+
+    if filters:
+        for k, v in filters.items():
+            pdf.cell(0, 8, f"- {k.title()}: {v}", ln=True)
+    else:
+        pdf.cell(0, 8, "No filters applied", ln=True)
+    pdf.ln(8)
+
+    # ===== Career Recommendations =====
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Career Recommendations", ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Arial", size=11)
+
+    for idx, career in enumerate(top_careers, start=1):
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(
+            0,
+            8,
+            f"{idx}. {career['Career']} (Match: {career['Score']*100:.1f}%)",
+            ln=True
+        )
+
+        pdf.set_font("Arial", size=11)
+
+        # Description
+        desc = career.get("Description", "No description available")
+        pdf.multi_cell(page_width, 7, f"Description: {desc}")
+
+        # Key Skills
+        skills = career.get("Key_Skills", "")
+        if skills:
+            pdf.multi_cell(page_width, 7, f"Key Skills: {skills}")
+
+        # Subjects
+        subjects = career.get("Subjects", "")
+        if subjects:
+            pdf.multi_cell(page_width, 7, f"Subjects: {subjects}")
+
+        pdf.ln(5)
+
+    # ===== Suggested Skills to Learn =====
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Suggested Skills to Learn", ln=True)
+    pdf.set_font("Arial", size=11)
+
+    suggested = set()
     for career in top_careers:
-        pdf.cell(0, 6, f"- {career['Career']} (Match: {career['Score']*100:.1f}%)", ln=True)
-        pdf.multi_cell(0, 6, f"  Skills: {career.get('Key_Skills', '-')}")
-        pdf.multi_cell(0, 6, f"  Subjects: {career.get('Subjects', '-')}")
-        pdf.multi_cell(0, 6, f"  Description: {career.get('Description', '-')}")
-        pdf.ln(3)
-    
+        req = {
+            s.strip().lower()
+            for s in str(career.get("Key_Skills", "")).split(",")
+            if s.strip()
+        }
+        suggested |= (req - set(detected_skills))
+
+    if suggested:
+        pdf.multi_cell(page_width, 8, ", ".join(sorted(suggested)))
+    else:
+        pdf.cell(0, 8, "You already match most required skills!", ln=True)
+
+    # ===== Footer =====
+    pdf.ln(10)
+    pdf.set_font("Arial", size=9)
+    pdf.cell(0, 8, "Generated by AI Career Guide", align="C")
+
     return pdf
 
-# ---------------------------
-# Highlight skills in resume
-# ---------------------------
 
-def highlight_skills(resume_text, hits):
-    highlighted = resume_text
-    for skill in hits:
-        highlighted = re.sub(
-            rf"(?i)\b{re.escape(skill)}\b",
-            lambda m: f"<mark>{m.group(0)}</mark>",
-            highlighted
-        )
-    return highlighted
+# ===========================
+# HERO SECTION
+# ===========================
 
-# ---------------------------
-# Missing skills suggestion
-# ---------------------------
-
-def missing_skills(top_careers, hits):
-    suggestions = {}
-    for career in top_careers:
-        required = {s.strip().lower() for s in str(career.get("Key_Skills","")).split(",")}
-        missing = required - hits
-        if missing:
-            suggestions[career['Career']] = missing
-    return suggestions
-
-# ---------------------------
-# App
-# ---------------------------
-
-st.set_page_config(page_title="AI Career Guide", page_icon="🎯", layout="wide")
-
-with st.sidebar:
-    st.title("🎯 AI Career Guide")
-    st.caption("Upload your resume and get personalized career matches.")
-
-    st.subheader("Filters")
-    education = st.selectbox(
-        "Education Level (optional)",
-        options=["", "Diploma", "Bachelor's", "Master's", "PhD", "MBBS"],
-        index=0,
-    )
-    work_style = st.multiselect(
-        "Work Style (optional)",
-        options=["Remote", "Team", "Solo", "Field", "Classroom", "Hospital", "Office"],
-    )
-    personality = st.multiselect(
-        "Personality (optional)",
-        options=["Analytical", "Creative", "Leader", "Practical", "Empathetic", "Detail-Oriented", "Patient", "Innovative"],
-    )
-
-    top_n = st.slider("How many top careers to show", 1, 10, 5)
-    show_chart = st.checkbox("Show bar chart", value=True)
-
-st.title("💼 AI Career Guide — Resume Based")
-st.write(
-    "Upload a **PDF**, **DOCX**, or **TXT** resume. We’ll detect skills, filter by your preferences, "
-    "and rank careers by skill overlap."
+st.markdown(
+    """
+    <div style="text-align:center; padding:20px 0;">
+        <h1>🎯 AI Career Guide</h1>
+        <p style="font-size:18px; color:#6b7280;">
+            Upload your resume and discover careers that truly fit you
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
 )
 
+# ===========================
+# SIDEBAR
+# ===========================
+
+with st.sidebar:
+    st.header("⚙️ Filters")
+    education = st.selectbox("Education Level", ["", "Diploma", "Bachelor's", "Master's", "PhD"])
+    top_n = st.slider("Number of Careers", 1, 10, 5)
+
+# ===========================
+# MAIN LOGIC
+# ===========================
+
 df = load_careers("data/careers.csv")
-uploaded = st.file_uploader("Upload your resume", type=["pdf", "docx", "txt"])
+uploaded = st.file_uploader("📄 Upload your Resume", type=["pdf", "docx", "txt"])
 
-if uploaded is not None:
-    try:
-        resume_text = extract_resume_text(uploaded)
-    except Exception as e:
-        st.error(f"Could not read the file: {e}")
-        st.stop()
-
-    if not resume_text.strip():
-        st.warning("The uploaded file appears empty. Please check your resume and try again.")
-        st.stop()
-
-    # ----------------------
-    # Skill detection
-    # ----------------------
+if uploaded:
+    resume_text = extract_resume_text(uploaded)
     skill_vocab = get_skill_vocab(df)
     hits = detect_resume_skills(resume_text, skill_vocab)
 
-    st.markdown("### 🔎 Detected Skills")
-    if hits:
-        for s in sorted(hits):
-            pill(s)
-    else:
-        st.info("No skills detected from the dataset. Check your resume formatting or add skills to careers.csv.")
+    st.divider()
+    st.subheader("🔍 Detected Skills")
+    for s in sorted(hits):
+        pill(s)
 
-    # ----------------------
-    # Resume preview with highlighted skills
-    # ----------------------
-    st.markdown("### 📝 Resume Preview with Detected Skills")
-    st.markdown(highlight_skills(resume_text, hits), unsafe_allow_html=True)
-
-    # ----------------------
-    # Filters
-    # ----------------------
     user_input = {}
     if education:
         user_input["education"] = education
-    if work_style:
-        user_input["work_style"] = "|".join(work_style)
-    if personality:
-        user_input["personality"] = "|".join(personality)
 
     filtered = match_careers(user_input, df)
 
     scores = []
     for idx, row in filtered.iterrows():
-        score = score_career(hits, row.get("Key_Skills", ""))
-        scores.append((idx, score))
+        scores.append((idx, score_career(hits, row["Key_Skills"])) )
 
-    scores.sort(key=lambda tup: (tup[1], str(filtered.loc[tup[0], "Career"]).lower()), reverse=True)
-
+    scores.sort(key=lambda x: x[1], reverse=True)
     top_rows = scores[:top_n]
 
-    if not top_rows:
-        st.warning("No careers matched your filters.")
-    else:
-        if show_chart:
-            fig, ax = plt.subplots()
-            labels = [filtered.loc[i, "Career"] for i, _ in top_rows]
-            values = [round(s * 100, 2) for _, s in top_rows]
-            bars = ax.bar(labels, values)
+    st.divider()
+    st.subheader("🧭 Recommended Careers")
 
-            ax.set_ylabel("Match Score (%)")
-            ax.set_title("Top Career Matches")
-            ax.set_ylim(0, 100)
-            plt.xticks(rotation=20, ha="right")
+    top_career_list = []
+    for i, s in top_rows:
+        row = filtered.loc[i].to_dict()
+        row["Score"] = s
+        career_card(row, s)
+        top_career_list.append(row)
 
-            for bar, val in zip(bars, values):
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + 1,
-                    f"{val:.1f}%",
-                    ha="center",
-                    va="bottom",
-                    fontsize=9,
-                )
+    st.divider()
+    st.subheader("📄 Download Report")
 
-            st.pyplot(fig, clear_figure=True)
+    pdf = generate_pdf("Resume Analysis", sorted(hits), user_input, top_career_list)
+    buffer = BytesIO()
+    pdf.output(buffer)
 
-        st.markdown("### 🧭 Recommended Careers")
-        top_career_list = []
-        for i, s in top_rows:
-            row = filtered.loc[i].to_dict()
-            card(row, s)
-            row["Score"] = s
-            top_career_list.append(row)
-
-        # ----------------------
-        # Missing skills suggestion
-        # ----------------------
-        suggestions = missing_skills(top_career_list, hits)
-        if suggestions:
-            st.markdown("### ⚡ Suggested Skills to Learn")
-            for career, skills in suggestions.items():
-                st.write(f"**{career}**: {', '.join(skills)}")
-
-        # ----------------------
-        # PDF download button
-        # ----------------------
-        if st.button("Download PDF Report"):
-            pdf = generate_pdf("Resume Analysis", sorted(hits), user_input, top_career_list)
-            pdf_output = pdf.output(dest='S').encode('latin1')
-            st.download_button(
-                label="Download PDF",
-                data=pdf_output,
-                file_name="career_report.pdf",
-                mime="application/pdf"
-            )
+    st.download_button(
+        "⬇️ Download PDF Report",
+        data=buffer.getvalue(),
+        file_name="career_report.pdf",
+        mime="application/pdf"
+    )
 
 else:
-    st.info("Upload a resume to begin. You can also set filters from the left sidebar.")
-    st.markdown(
-        """
-        **Tips**
-        - Use a PDF or DOCX with clear sections like *Skills*, *Projects*, and *Education*.
-        - The app looks for skills listed in your dataset's **Key_Skills** column.
-        - Add more roles and skills in `data/careers.csv` to improve matching.
-        """
-    )
+    st.info("⬆️ Upload your resume to get started")
